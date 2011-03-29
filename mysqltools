@@ -1,0 +1,242 @@
+#!/usr/bin/php -q
+<?php
+class MysqlTools {
+    private $host = 'localhost';
+    private $user = 'root';
+    private $pass = 'changeme'; // <---- changeme
+    private $db   = array();
+    private $link;
+    private $_argv;
+
+    public function MysqlTools($argv)
+    {
+        $this->_argv = $argv;
+    }
+
+    private function connect()
+    {
+        $this->link = @mysql_connect($this->host, $this->user, $this->pass);
+
+        if(!$this->link) {
+            die(mysql_error()."\n");
+        }
+    }
+
+    private function dbSize()
+    {
+        if(sizeof($this->_argv) < 3) {
+            die(sprintf('Uso: %s dbsize db1 db2 ... dbn%s', $this->_argv[0], "\n"));
+        }
+
+        foreach($this->_argv as $k => $a) {
+            if($k < 2) {
+                continue;
+            }
+            $this->db[] = $a;
+        }
+
+        foreach($this->db as $db) {
+            mysql_select_db($db) || die(mysql_error()."\n");
+            $rs = mysql_query('show table status', $this->link);
+            $size = 0;
+            while($r = mysql_fetch_array($rs, MYSQL_ASSOC)) {
+                $size += $r['Data_length'];
+                $size += $r['Index_length'];
+            }
+            $size = $size / 1024 / 1024;
+            echo sprintf('Database "%s" size: %sM%s', $db, $size, "\n");
+        }
+    }
+
+    private function dbTablesDiff()
+    {
+        if(sizeof($this->_argv) != 4) {
+            die(sprintf('Uso: %s dbtablesdiff olddb newdb%s', $this->_argv[0], "\n"));
+        }
+
+        foreach($this->_argv as $k => $a) {
+            if($k < 2) {
+                continue;
+            }
+            $this->db[] = $a;
+        }
+
+        $tables  = array();
+        $fields  = array();
+        $cfields = array();
+
+        foreach($this->db as $db) {
+            mysql_select_db($db) || die(mysql_error()."\n");
+            $rs = mysql_query('show tables', $this->link);
+            while($r = mysql_fetch_array($rs, MYSQL_NUM)) {
+                foreach($r as $v) {
+                    $tables[$db][] = $v;
+                }
+            }
+            foreach($tables[$db] as $v) {
+                $rs = mysql_query( sprintf('show columns from %s ', $v), $this->link);
+                while($r = mysql_fetch_array($rs, MYSQL_ASSOC)) {
+                    $fields[$db][$v][] = $r['Field'];
+                    $cfields[$db][$v][$r['Field']] = md5(print_r($r, true));
+                }
+            }
+        }
+
+        $nTables1 = sizeof($this->db[0]);
+        $nTables2 = sizeof($this->db[1]);
+
+        $tablesAdded   = array_diff($tables[$this->db[1]], $tables[$this->db[0]]);
+        $tablesRemoved = array_diff($tables[$this->db[0]], $tables[$this->db[1]]);
+
+        if(sizeof($tablesAdded)) {
+            echo sprintf('# New tables: %s%s', sizeof($tablesAdded), "\n");
+        }
+
+        foreach($tablesAdded as $newTable) {
+            echo sprintf('A %s%s', $newTable, "\n");
+        }
+
+        if(sizeof($tablesRemoved)) {
+            echo sprintf('# Deleted tables: %s%s', sizeof($tablesRemoved), "\n");
+        }
+
+        foreach($tablesRemoved as $delTable) {
+            echo sprintf('D %s%s', $delTable, "\n");
+        }
+
+        $odb = $this->db[1];
+        foreach($fields as $ndb => $ntables) {
+            foreach($ntables as $ntable => $tfil) {
+                if(array_search($ntable, $tables[$odb]) !== false) {
+                    $addedFields   = array_diff($fields[$odb][$ntable], $tfil);
+                    $removedFields = array_diff($tfil, $fields[$odb][$ntable]);
+
+                    if(sizeof($addedFields)) {
+                        echo sprintf('# New filds in table "%s": %s%s',  $ntable, sizeof($addedFields), "\n");
+                    }
+
+                    foreach($addedFields as $af) {
+                        echo sprintf('AF %s.%s%s', $ntable, $af, "\n");
+                    }
+
+                    if(sizeof($removedFields)) {
+                        echo sprintf('# Deleted filds in table "%s" : %s%s',  $ntable, sizeof($removedFields), "\n");
+                    }
+
+                    foreach($removedFields as $rf) {
+                        echo sprintf('DF %s.%s%s', $ntable, $rf, "\n");
+                    }
+
+                    $sameFields = array_intersect($tfil, $fields[$odb][$ntable]);
+
+                    $cf = array();
+
+                    foreach($cfields[$ndb][$ntable] as $f => $v) {
+                        if(!array_key_exists($f, $cfields[$odb][$ntable])) {
+                            continue;
+                        }
+                        if($v != $cfields[$odb][$ntable][$f]) {
+                            $cf[] = $f;
+                        }
+                    }
+
+                    if(sizeof($cf)) {
+                        echo sprintf('# Changed filds in table "%s" : %s%s',  $ntable, sizeof($cf), "\n");
+                    }
+
+                    foreach($cf as $c) {
+                        echo sprintf('CF %s.%s%s', $ntable, $c, "\n");
+                    }
+                }
+            }
+            $odb = $this->db[0];
+            break; // :)
+        }
+    }
+
+    private function dbRelations( )
+    {
+        if(sizeof($this->_argv) != 3) {
+            die(sprintf('Uso: %s dbrelactions db%s', $this->_argv[0], "\n"));
+        }
+
+        $db = $this->_argv[2];
+        $tables = array();
+
+        mysql_select_db($db) || die( mysql_error()."\n");
+        $rs = mysql_query('show tables', $this->link);
+        while($r = mysql_fetch_array($rs, MYSQL_NUM)) {
+            foreach($r as $v) {
+                $tables[] = $v;
+            }
+        }
+
+        foreach($tables as $table) {
+            $rs = mysql_query( sprintf('SHOW CREATE TABLE %s', $table));
+            $result = mysql_fetch_array($rs, MYSQL_ASSOC);
+
+            if(!@$result['Create Table']) {
+                continue;
+            }
+
+            $script = str_replace( array('(',')', '`'), array('','',''), $result['Create Table']);
+            $source = explode( "\n", $script);
+            $cont = 0;
+            $fk = array();
+            foreach($source as $line) {
+                $line = trim($line);
+                if(substr($line,0, 10) == 'CONSTRAINT') {
+                    $tokens = explode( ' ', $line);
+                    $fk[$cont]['field']   = $tokens[4];
+                    $fk[$cont]['fktable'] = $tokens[6];
+                    $fk[$cont]['fkfield'] = $tokens[7];
+                    $cont++;
+                }
+            }
+
+            if(sizeof($fk)) {
+                echo sprintf('# table "%s" : %s%s', $table, sizeof($fk), "\n");
+            }
+
+            foreach($fk as $f) {
+                echo sprintf('%s.%s -> %s.%s%s', $table, $f['field'], $f['fktable'], $f['fkfield'], "\n");
+            }
+        }
+    }
+
+    private function uso()
+    {
+        echo sprintf('Uso: %s <relations|tablesdiff|size> options %s', $this->_argv[0], "\n");
+        echo "relations:  dbname\n";
+        echo "size:       db1 db2 ... dbn\n";
+        echo "tablesdiff: olddb newdb\n";
+    }
+
+    public function run()
+    {
+        $this->connect();
+
+        $opt = trim(@$this->_argv[1]);
+        switch($opt) {
+            case 'size':
+                $this->dbSize();
+                break;
+
+              case 'relations':
+                  $this->dbRelations();
+                break;
+
+              case 'tablesdiff':
+                  $this->dbTablesDiff();
+                  break;
+
+              default:
+                  $this->uso();
+                  echo sprintf('Opcao desconhecida(%s)%s', $opt, "\n");
+                  break;
+          }
+      }
+  }
+
+  $mt = new MysqlTools($argv);
+  $mt->run();
